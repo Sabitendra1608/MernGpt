@@ -27,7 +27,7 @@ export const textMessageController = async (req, res) => {
             messages: [{ role: "user", content: prompt }],
         });
 
-        const reply = {...choices[0].message, timestamp: Date.now(), isImage: false}  // ✅ .message not .messages
+        const reply = {...choices[0].message, timestamp: Date.now(), isImage: false} 
         res.json({success: true, reply})
         chat.messages.push(reply);
         await chat.save()
