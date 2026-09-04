@@ -36,11 +36,21 @@ export const getPlans = async (req, res) => {
     }
 }
 
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+const stripe = process.env.STRIPE_SECRET_KEY
+    ? new Stripe(process.env.STRIPE_SECRET_KEY)
+    : null;
 
 // api controller for purchasing a plan
 export const purchasePlan = async (req, res) => {
     try {
+        if (!stripe) {
+    return res.json({
+        success: false,
+        message: "Payment system is currently unavailable"
+    });
+}
+
+
         const {planId} = req.body
         const userId = req.user._id
         const plan = plans.find((plan) => plan._id === planId)
@@ -89,8 +99,15 @@ export const purchasePlan = async (req, res) => {
 
 export const verifyPayment = async (req, res) => {
     try {
+
+        if (!stripe) {
+            return res.json({
+                success: false,
+                message: "Payment system is currently unavailable"
+            });
+        }
+
         const { sessionId } = req.body;
-        const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
         const session = await stripe.checkout.sessions.retrieve(sessionId);
 
