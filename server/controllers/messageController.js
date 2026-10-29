@@ -34,7 +34,15 @@ export const textMessageController = async (req, res) => {
 
         await User.updateOne({_id: userId}, {$inc : {credits: -1}})
     } catch (error) {
-        res.json({success: false, messages: error.message})
+    console.error("TEXT MESSAGE ERROR:", error);
+    console.error("ERROR STATUS:", error.status || error.response?.status);
+    console.error("ERROR RESPONSE:", error.response?.data);
+    console.error("ERROR URL:", error.request?.url);
+
+    res.status(error.status || error.response?.status || 500).json({
+        success: false,
+        message: error.message
+    });
     }
 }
 
