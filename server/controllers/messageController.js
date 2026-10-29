@@ -63,7 +63,13 @@ export const imageMessageController = async (req, res) => {
         
         const generatedImageUrl = `${process.env.IMAGEKIT_URL_ENDPOINT}/ik-genimg-prompt-${encodedPrompt}/quickgpt/${Date.now()}.png?tr=w-800,h-800`;
 
+        console.log("Generated Image URL:", generatedImageUrl);
+
         const aiIMageResponse = await axios.get(generatedImageUrl, {responseType: "arraybuffer"})
+
+        console.log("Image response status:", aiIMageResponse.status);
+console.log("Image content type:", aiIMageResponse.headers["content-type"]);
+console.log("Image response size:", aiIMageResponse.data.length);
 
         
         const base64Image = `data:image/png;base64,${Buffer.from(aiIMageResponse.data, "binary").toString('base64')}`
@@ -74,6 +80,8 @@ export const imageMessageController = async (req, res) => {
             folder: 'merngpt'
         })
 
+        console.log("ImageKit upload URL:", uploadResponse.url);
+
         const reply = {role:'assistant', content: uploadResponse.url, timestamp: Date.now(), isImage: true, isPublished}
         res.json({success: true, reply})
 
@@ -83,8 +91,15 @@ export const imageMessageController = async (req, res) => {
         await User.updateOne({_id: userId}, {$inc : {credits: -2}})
 
     } catch (error) {
-        res.json({success: false, message: error.message})      
-    }
+    console.error("IMAGE GENERATION ERROR:", error.message);
+    console.error("HTTP STATUS:", error.response?.status);
+    console.error("RESPONSE DATA:", error.response?.data);
+
+    res.status(error.response?.status || 500).json({
+        success: false,
+        message: error.message
+    });
+}
 }
 
 // for deleteing the image from community 
