@@ -47,60 +47,140 @@ export const textMessageController = async (req, res) => {
 }
 
 // image based message controller
+
 export const imageMessageController = async (req, res) => {
     try {
         const userId = req.user._id;
-        if(req.user.credits < 2) {
-            return res.json({success: false, message: "You don't have enough credits to use this feature!"})
+        const { prompt, chatId, isPublished } = req.body;
+
+        // Check credits
+        if (req.user.credits < 2) {
+            return res.status(400).json({
+                success: false,
+                message: "You don't have enough credits to use this feature!"
+            });
         }
-        const {prompt, chatId, isPublished} = req.body
 
-        const chat = await Chat.findOne({userId, _id: chatId})
-        chat.messages.push({role: 'user', content: prompt, timestamp: Date.now(), isImage: true})
-        
+        if (!prompt || !chatId) {
+            return res.status(400).json({
+                success: false,
+                message: "Prompt and chatId are required."
+            });
+        }
+
+        // Find chat
+        const chat = await Chat.findOne({ userId, _id: chatId });
+
+        if (!chat) {
+            return res.status(404).json({
+                success: false,
+                message: "Chat not found."
+            });
+        }
+
+        // Generate image using ImageKit URL-based generation
         const encodedPrompt = encodeURIComponent(prompt);
+        const endpoint = process.env.IMAGEKIT_URL_ENDPOINT?.replace(/\/$/, "");
 
-        
-        const generatedImageUrl = `${process.env.IMAGEKIT_URL_ENDPOINT}/ik-genimg-prompt-${encodedPrompt}/quickgpt/${Date.now()}.png?tr=w-800,h-800`;
+        if (!endpoint) {
+            throw new Error("IMAGEKIT_URL_ENDPOINT is not configured.");
+        }
 
-        console.log("Generated Image URL:", generatedImageUrl);
+        const generatedImageUrl =
+            `${endpoint}/ik-genimg-prompt-${encodedPrompt}/quickgpt/${Date.now()}.png?tr=w-800,h-800`;
 
-        const aiIMageResponse = await axios.get(generatedImageUrl, {responseType: "arraybuffer"})
+        console.log("Requesting generated image from ImageKit...");
 
-        console.log("Image response status:", aiIMageResponse.status);
-console.log("Image content type:", aiIMageResponse.headers["content-type"]);
-console.log("Image response size:", aiIMageResponse.data.length);
+        const imageResponse = await axios.get(generatedImageUrl, {
+            responseType: "arraybuffer",
+            validateStatus: (status) => status >= 200 && status < 300
+        });
 
-        
-        const base64Image = `data:image/png;base64,${Buffer.from(aiIMageResponse.data, "binary").toString('base64')}`
+        const contentType = imageResponse.headers["content-type"] || "";
+        const imageBuffer = Buffer.from(imageResponse.data);
 
+        console.log("Image generation status:", imageResponse.status);
+        console.log("Image content type:", contentType);
+        console.log("Image size in bytes:", imageBuffer.length);
+
+        // Verify the response is an image
+        if (!contentType.startsWith("image/")) {
+            const responseText = imageBuffer.toString("utf8").slice(0, 500);
+            console.error("ImageKit returned non-image content:", responseText);
+
+            throw new Error(
+                `ImageKit did not return an image. Content-Type: ${contentType || "unknown"}`
+            );
+        }
+
+        if (imageBuffer.length === 0) {
+            throw new Error("ImageKit returned an empty image.");
+        }
+
+        // Upload binary image to ImageKit storage
         const uploadResponse = await imagekit.files.upload({
-            file: base64Image,
+            file: imageBuffer,
             fileName: `${Date.now()}.png`,
-            folder: 'merngpt'
-        })
+            folder: "merngpt"
+        });
 
-        console.log("ImageKit upload URL:", uploadResponse.url);
+        if (!uploadResponse?.url) {
+            throw new Error("ImageKit upload did not return an image URL.");
+        }
 
-        const reply = {role:'assistant', content: uploadResponse.url, timestamp: Date.now(), isImage: true, isPublished}
-        res.json({success: true, reply})
+        console.log("Image uploaded successfully:", uploadResponse.url);
 
-        chat.messages.push(reply)
-        await chat.save()
+        // Save the user's prompt and generated image
+        const userMessage = {
+            role: "user",
+            content: prompt,
+            timestamp: Date.now(),
+            isImage: true
+        };
 
-        await User.updateOne({_id: userId}, {$inc : {credits: -2}})
+        const reply = {
+            role: "assistant",
+            content: uploadResponse.url,
+            timestamp: Date.now(),
+            isImage: true,
+            isPublished
+        };
+
+        chat.messages.push(userMessage, reply);
+        await chat.save();
+
+        // Deduct credits after successfully saving the chat
+        await User.updateOne(
+            { _id: userId },
+            { $inc: { credits: -2 } }
+        );
+
+        // Return success only after saving
+        return res.json({
+            success: true,
+            reply
+        });
 
     } catch (error) {
-    console.error("IMAGE GENERATION ERROR:", error.message);
-    console.error("HTTP STATUS:", error.response?.status);
-    console.error("RESPONSE DATA:", error.response?.data);
+        console.error("IMAGE GENERATION ERROR:", error.message);
+        console.error("HTTP STATUS:", error.response?.status);
+        console.error("RESPONSE CONTENT TYPE:", error.response?.headers?.["content-type"]);
 
-    res.status(error.response?.status || 500).json({
-        success: false,
-        message: error.message
-    });
-}
-}
+        if (error.response?.data) {
+            const data = Buffer.isBuffer(error.response.data)
+                ? error.response.data.toString("utf8").slice(0, 500)
+                : error.response.data;
+
+            console.error("ERROR RESPONSE:", data);
+        }
+
+        return res.status(error.response?.status || 500).json({
+            success: false,
+            message: error.message || "Image generation failed."
+        });
+    }
+};
+
 
 // for deleteing the image from community 
 export const deleteImage = async (req, res) => {
