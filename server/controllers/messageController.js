@@ -48,12 +48,13 @@ export const textMessageController = async (req, res) => {
 
 // image based message controller
 
+
 export const imageMessageController = async (req, res) => {
     try {
         const userId = req.user._id;
         const { prompt, chatId, isPublished } = req.body;
 
-        // Check credits
+        // 1. Validate credits and input
         if (req.user.credits < 2) {
             return res.status(400).json({
                 success: false,
@@ -61,14 +62,14 @@ export const imageMessageController = async (req, res) => {
             });
         }
 
-        if (!prompt || !chatId) {
+        if (!prompt?.trim() || !chatId) {
             return res.status(400).json({
                 success: false,
                 message: "Prompt and chatId are required."
             });
         }
 
-        // Find chat
+        // 2. Find the chat
         const chat = await Chat.findOne({ userId, _id: chatId });
 
         if (!chat) {
@@ -78,22 +79,29 @@ export const imageMessageController = async (req, res) => {
             });
         }
 
-        // Generate image using ImageKit URL-based generation
-        const encodedPrompt = encodeURIComponent(prompt);
-        const endpoint = process.env.IMAGEKIT_URL_ENDPOINT?.replace(/\/$/, "");
+        // 3. Validate ImageKit endpoint
+        const endpoint = process.env.IMAGEKIT_URL_ENDPOINT?.replace(/\/+$/, "");
 
         if (!endpoint) {
             throw new Error("IMAGEKIT_URL_ENDPOINT is not configured.");
         }
 
+        // 4. Construct the ImageKit AI-generation URL
+        const encodedPrompt = encodeURIComponent(prompt.trim());
+        const uniqueId = `${Date.now()}-${Math.random()
+            .toString(36)
+            .slice(2, 8)}`;
+
         const generatedImageUrl =
-            `${endpoint}/ik-genimg-prompt-${encodedPrompt}/quickgpt/${Date.now()}.png?tr=w-800,h-800`;
+            `${endpoint}/ik-genimg-prompt-${encodedPrompt}/quickgpt/${uniqueId}.png`;
 
-        console.log("Requesting generated image from ImageKit...");
+        console.log("Requesting image from ImageKit...");
 
+        // 5. Download the generated image
         const imageResponse = await axios.get(generatedImageUrl, {
             responseType: "arraybuffer",
-            validateStatus: (status) => status >= 200 && status < 300
+            validateStatus: (status) => status >= 200 && status < 300,
+            timeout: 120000
         });
 
         const contentType = imageResponse.headers["content-type"] || "";
@@ -101,15 +109,16 @@ export const imageMessageController = async (req, res) => {
 
         console.log("Image generation status:", imageResponse.status);
         console.log("Image content type:", contentType);
-        console.log("Image size in bytes:", imageBuffer.length);
+        console.log("Image size:", imageBuffer.length, "bytes");
 
-        // Verify the response is an image
-        if (!contentType.startsWith("image/")) {
-            const responseText = imageBuffer.toString("utf8").slice(0, 500);
-            console.error("ImageKit returned non-image content:", responseText);
+        // 6. Verify that ImageKit returned actual image data
+        if (!contentType.toLowerCase().startsWith("image/")) {
+            const responseText = imageBuffer.toString("utf8").slice(0, 1000);
+
+            console.error("ImageKit non-image response:", responseText);
 
             throw new Error(
-                `ImageKit did not return an image. Content-Type: ${contentType || "unknown"}`
+                `ImageKit returned ${contentType || "an unknown content type"}, not an image. Check the Render logs for the response details.`
             );
         }
 
@@ -117,10 +126,10 @@ export const imageMessageController = async (req, res) => {
             throw new Error("ImageKit returned an empty image.");
         }
 
-        // Upload binary image to ImageKit storage
+        // 7. Upload the image to ImageKit storage
         const uploadResponse = await imagekit.files.upload({
             file: imageBuffer,
-            fileName: `${Date.now()}.png`,
+            fileName: `${uniqueId}.png`,
             folder: "merngpt"
         });
 
@@ -128,12 +137,12 @@ export const imageMessageController = async (req, res) => {
             throw new Error("ImageKit upload did not return an image URL.");
         }
 
-        console.log("Image uploaded successfully:", uploadResponse.url);
+        console.log("Uploaded image URL:", uploadResponse.url);
 
-        // Save the user's prompt and generated image
+        // 8. Save messages in the chat
         const userMessage = {
             role: "user",
-            content: prompt,
+            content: prompt.trim(),
             timestamp: Date.now(),
             isImage: true
         };
@@ -149,13 +158,17 @@ export const imageMessageController = async (req, res) => {
         chat.messages.push(userMessage, reply);
         await chat.save();
 
-        // Deduct credits after successfully saving the chat
-        await User.updateOne(
-            { _id: userId },
+        // 9. Deduct credits after saving successfully
+        const updatedUser = await User.updateOne(
+            { _id: userId, credits: { $gte: 2 } },
             { $inc: { credits: -2 } }
         );
 
-        // Return success only after saving
+        if (updatedUser.modifiedCount !== 1) {
+            console.error("Could not deduct image credits for user:", userId);
+        }
+
+        // 10. Return the generated image URL
         return res.json({
             success: true,
             reply
@@ -164,11 +177,14 @@ export const imageMessageController = async (req, res) => {
     } catch (error) {
         console.error("IMAGE GENERATION ERROR:", error.message);
         console.error("HTTP STATUS:", error.response?.status);
-        console.error("RESPONSE CONTENT TYPE:", error.response?.headers?.["content-type"]);
+        console.error(
+            "RESPONSE CONTENT TYPE:",
+            error.response?.headers?.["content-type"]
+        );
 
         if (error.response?.data) {
             const data = Buffer.isBuffer(error.response.data)
-                ? error.response.data.toString("utf8").slice(0, 500)
+                ? error.response.data.toString("utf8").slice(0, 1000)
                 : error.response.data;
 
             console.error("ERROR RESPONSE:", data);
@@ -180,6 +196,7 @@ export const imageMessageController = async (req, res) => {
         });
     }
 };
+
 
 
 // for deleteing the image from community 
