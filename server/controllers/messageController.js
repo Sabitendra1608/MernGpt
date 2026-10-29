@@ -3,11 +3,16 @@ import OpenAI from "openai"
 import Chat from "../models/Chat.js"
 import User from "../models/User.js"
 import imagekit from "../config/imageKit.js"
+import { GoogleGenAI } from "@google/genai";
 
 
 const openai = new OpenAI({
     apiKey: process.env.GEMINI_API_KEY,
     baseURL: "https://generativelanguage.googleapis.com/v1beta/openai/"
+});
+
+const genAI = new GoogleGenAI({
+    apiKey: process.env.GEMINI_API_KEY
 });
 
 // text-based AI chat message controller
@@ -49,12 +54,21 @@ export const textMessageController = async (req, res) => {
 // image based message controller
 
 
+
 export const imageMessageController = async (req, res) => {
     try {
         const userId = req.user._id;
         const { prompt, chatId, isPublished } = req.body;
 
-        // 1. Validate credits and input
+        // 1. Validate request
+        if (!prompt || !prompt.trim() || !chatId) {
+            return res.status(400).json({
+                success: false,
+                message: "Prompt and chatId are required."
+            });
+        }
+
+        // 2. Check credits
         if (req.user.credits < 2) {
             return res.status(400).json({
                 success: false,
@@ -62,15 +76,11 @@ export const imageMessageController = async (req, res) => {
             });
         }
 
-        if (!prompt?.trim() || !chatId) {
-            return res.status(400).json({
-                success: false,
-                message: "Prompt and chatId are required."
-            });
-        }
-
-        // 2. Find the chat
-        const chat = await Chat.findOne({ userId, _id: chatId });
+        // 3. Verify chat ownership
+        const chat = await Chat.findOne({
+            userId,
+            _id: chatId
+        });
 
         if (!chat) {
             return res.status(404).json({
@@ -79,67 +89,96 @@ export const imageMessageController = async (req, res) => {
             });
         }
 
-        // 3. Validate ImageKit endpoint
-        const endpoint = process.env.IMAGEKIT_URL_ENDPOINT?.replace(/\/+$/, "");
-
-        if (!endpoint) {
-            throw new Error("IMAGEKIT_URL_ENDPOINT is not configured.");
+        // 4. Check environment variables
+        if (!process.env.GEMINI_API_KEY) {
+            throw new Error("GEMINI_API_KEY is missing.");
         }
 
-        // 4. Construct the ImageKit AI-generation URL
-        const encodedPrompt = encodeURIComponent(prompt.trim());
-        const uniqueId = `${Date.now()}-${Math.random()
-            .toString(36)
-            .slice(2, 8)}`;
+        if (
+            !process.env.IMAGEKIT_PUBLIC_KEY ||
+            !process.env.IMAGEKIT_PRIVATE_KEY ||
+            !process.env.IMAGEKIT_URL_ENDPOINT
+        ) {
+            throw new Error("ImageKit environment variables are missing.");
+        }
 
-        const generatedImageUrl =
-            `${endpoint}/ik-genimg-prompt-${encodedPrompt}/quickgpt/${uniqueId}.png`;
+        // 5. Generate image using Gemini
+        console.log("Generating image using Gemini...");
 
-        console.log("Requesting image from ImageKit...");
-
-        // 5. Download the generated image
-        const imageResponse = await axios.get(generatedImageUrl, {
-            responseType: "arraybuffer",
-            validateStatus: (status) => status >= 200 && status < 300,
-            timeout: 120000
+        const response = await genAI.models.generateContent({
+            model: "gemini-3.1-flash-image",
+            contents: prompt.trim(),
+            config: {
+                responseModalities: ["TEXT", "IMAGE"]
+            }
         });
 
-        const contentType = imageResponse.headers["content-type"] || "";
-        const imageBuffer = Buffer.from(imageResponse.data);
+        // 6. Extract generated image data
+        const parts = response.candidates
+            ?.flatMap(candidate => candidate.content?.parts ?? []) ?? [];
 
-        console.log("Image generation status:", imageResponse.status);
-        console.log("Image content type:", contentType);
-        console.log("Image size:", imageBuffer.length, "bytes");
+        const imagePart = parts.find(
+            part => part.inlineData?.data
+        );
 
-        // 6. Verify that ImageKit returned actual image data
-        if (!contentType.toLowerCase().startsWith("image/")) {
-            const responseText = imageBuffer.toString("utf8").slice(0, 1000);
+        if (!imagePart) {
+            const textResponse = parts
+                .filter(part => part.text)
+                .map(part => part.text)
+                .join("\n");
 
-            console.error("ImageKit non-image response:", responseText);
+            console.error(
+                "Gemini did not return image data:",
+                textResponse
+            );
 
             throw new Error(
-                `ImageKit returned ${contentType || "an unknown content type"}, not an image. Check the Render logs for the response details.`
+                textResponse ||
+                "Gemini did not return an image. Check model access and API limits."
             );
         }
 
-        if (imageBuffer.length === 0) {
-            throw new Error("ImageKit returned an empty image.");
+        const imageBuffer = Buffer.from(
+            imagePart.inlineData.data,
+            "base64"
+        );
+
+        if (!imageBuffer.length) {
+            throw new Error("Gemini returned an empty image.");
         }
 
-        // 7. Upload the image to ImageKit storage
+        const mimeType =
+            imagePart.inlineData.mimeType || "image/png";
+
+        const extension =
+            mimeType === "image/jpeg" ? "jpg" :
+            mimeType === "image/webp" ? "webp" : "png";
+
+        console.log(
+            "Gemini image generated:",
+            imageBuffer.length,
+            "bytes"
+        );
+
+        // 7. Upload generated image to ImageKit
+        console.log("Uploading image to ImageKit...");
+
         const uploadResponse = await imagekit.files.upload({
             file: imageBuffer,
-            fileName: `${uniqueId}.png`,
-            folder: "merngpt"
+            fileName: `generated-${Date.now()}.${extension}`,
+            folder: "/merngpt",
+            useUniqueFileName: true
         });
 
         if (!uploadResponse?.url) {
-            throw new Error("ImageKit upload did not return an image URL.");
+            throw new Error(
+                "ImageKit upload failed to return an image URL."
+            );
         }
 
-        console.log("Uploaded image URL:", uploadResponse.url);
+        console.log("Image uploaded:", uploadResponse.url);
 
-        // 8. Save messages in the chat
+        // 8. Prepare chat messages
         const userMessage = {
             role: "user",
             content: prompt.trim(),
@@ -152,50 +191,78 @@ export const imageMessageController = async (req, res) => {
             content: uploadResponse.url,
             timestamp: Date.now(),
             isImage: true,
-            isPublished
+            isPublished: Boolean(isPublished)
         };
 
-        chat.messages.push(userMessage, reply);
-        await chat.save();
-
-        // 9. Deduct credits after saving successfully
-        const updatedUser = await User.updateOne(
-            { _id: userId, credits: { $gte: 2 } },
-            { $inc: { credits: -2 } }
+        // 9. Deduct credits atomically
+        const updatedUser = await User.findOneAndUpdate(
+            {
+                _id: userId,
+                credits: { $gte: 2 }
+            },
+            {
+                $inc: { credits: -2 }
+            },
+            {
+                new: true
+            }
         );
 
-        if (updatedUser.modifiedCount !== 1) {
-            console.error("Could not deduct image credits for user:", userId);
+        if (!updatedUser) {
+            return res.status(400).json({
+                success: false,
+                message: "You don't have enough credits to use this feature!"
+            });
         }
 
-        // 10. Return the generated image URL
-        return res.json({
+        // 10. Save messages in MongoDB
+        try {
+            chat.messages.push(userMessage, reply);
+            await chat.save();
+        } catch (saveError) {
+            // Refund credits if saving the chat fails
+            await User.updateOne(
+                { _id: userId },
+                { $inc: { credits: 2 } }
+            );
+
+            throw saveError;
+        }
+
+        // 11. Return response to frontend
+        return res.status(200).json({
             success: true,
-            reply
+            reply,
+            credits: updatedUser.credits
         });
 
     } catch (error) {
-        console.error("IMAGE GENERATION ERROR:", error.message);
-        console.error("HTTP STATUS:", error.response?.status);
         console.error(
-            "RESPONSE CONTENT TYPE:",
-            error.response?.headers?.["content-type"]
+            "IMAGE GENERATION ERROR:",
+            error.message
         );
 
-        if (error.response?.data) {
-            const data = Buffer.isBuffer(error.response.data)
-                ? error.response.data.toString("utf8").slice(0, 1000)
-                : error.response.data;
-
-            console.error("ERROR RESPONSE:", data);
+        if (error.status) {
+            console.error("API STATUS:", error.status);
         }
 
-        return res.status(error.response?.status || 500).json({
+        if (error.response?.status) {
+            console.error("HTTP STATUS:", error.response.status);
+        }
+
+        if (error.response?.data) {
+            console.error("API ERROR RESPONSE:", error.response.data);
+        }
+
+        return res.status(
+            error.status || error.response?.status || 500
+        ).json({
             success: false,
             message: error.message || "Image generation failed."
         });
     }
 };
+
 
 
 
