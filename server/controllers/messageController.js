@@ -4,6 +4,7 @@ import Chat from "../models/Chat.js"
 import User from "../models/User.js"
 import imagekit from "../config/imageKit.js"
 import { GoogleGenAI } from "@google/genai";
+import { buildContextWindow } from "../utils/contextManager.js";
 
 
 const openai = new OpenAI({
@@ -16,40 +17,98 @@ const genAI = new GoogleGenAI({
 });
 
 // text-based AI chat message controller
+
 export const textMessageController = async (req, res) => {
     try {
-        const userId = req.user._id
-        if(req.user.credits < 1) {
-            return res.json({success: false, message: "You don't have enough credits to use this feature!"})
+        const userId = req.user._id;
+
+        if (req.user.credits < 1) {
+            return res.json({
+                success: false,
+                message: "You don't have enough credits to use this feature!"
+            });
         }
-        const {chatId, prompt} = req.body
 
-        const chat = await Chat.findOne({userId, _id: chatId})
-        chat.messages.push({role: 'user', content: prompt, timestamp: Date.now(), isImage: false})
+        const { chatId, prompt } = req.body;
 
-        const {choices} = await openai.chat.completions.create({
-            model: "gemini-3.5-flash-lite",  
-            messages: [{ role: "user", content: prompt }],
+        // Validate input
+        if (!chatId || !prompt?.trim()) {
+            return res.status(400).json({
+                success: false,
+                message: "Chat ID and prompt are required"
+            });
+        }
+
+        // Find the chat belonging to this user
+        const chat = await Chat.findOne({
+            userId,
+            _id: chatId
         });
 
-        const reply = {...choices[0].message, timestamp: Date.now(), isImage: false} 
-        res.json({success: true, reply})
+        if (!chat) {
+            return res.status(404).json({
+                success: false,
+                message: "Chat not found"
+            });
+        }
+
+        // Add the current user message to chat history
+        chat.messages.push({
+            role: "user",
+            content: prompt.trim(),
+            timestamp: Date.now(),
+            isImage: false
+        });
+
+        // Build token-aware conversation history
+        const conversationHistory = buildContextWindow(
+            chat.messages,
+            6000
+        );
+
+        // Send conversation history to Gemini
+        const { choices } = await openai.chat.completions.create({
+            model: "gemini-3.5-flash-lite",
+            messages: conversationHistory
+        });
+
+        // Prepare AI response
+        const reply = {
+            role: "assistant",
+            content: choices[0].message.content,
+            timestamp: Date.now(),
+            isImage: false
+        };
+
+        // Save AI response
         chat.messages.push(reply);
-        await chat.save()
 
-        await User.updateOne({_id: userId}, {$inc : {credits: -1}})
+        await chat.save();
+
+        // Deduct one credit
+        await User.updateOne(
+            { _id: userId },
+            { $inc: { credits: -1 } }
+        );
+
+        return res.json({
+            success: true,
+            reply
+        });
+
     } catch (error) {
-    console.error("TEXT MESSAGE ERROR:", error);
-    console.error("ERROR STATUS:", error.status || error.response?.status);
-    console.error("ERROR RESPONSE:", error.response?.data);
-    console.error("ERROR URL:", error.request?.url);
+        console.error("TEXT MESSAGE ERROR:", error);
+        console.error("ERROR STATUS:", error.status || error.response?.status);
+        console.error("ERROR RESPONSE:", error.response?.data);
+        console.error("ERROR URL:", error.request?.url);
 
-    res.status(error.status || error.response?.status || 500).json({
-        success: false,
-        message: error.message
-    });
+        return res.status(error.status || error.response?.status || 500).json({
+            success: false,
+            message: error.message
+        });
     }
-}
+};
+
 
 // image based message controller
 
